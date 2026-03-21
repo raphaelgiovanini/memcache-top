@@ -1,0 +1,14 @@
+services:
+  memcached:
+    image: memcached:latest
+    ports:
+      - "11211:11211"
+
+  memcache-top:
+    build: .
+    depends_on:
+      - memcached
+    command: ["--instances", "memcached:11211", "--sleep", "3", "--color"]
+    tty: true
+    stdin_open: true
+    network_mode: host

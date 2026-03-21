@@ -1,58 +1,11 @@
 #!/usr/bin/perl -w
 
 ################################################################################
-# memcache-top.pl
+# memcache-top
 #
-# "top" for memcache - watch the traffic and other stats in real-time.  Yoikes.
+# "top" for memcache - watch the traffic and other stats in real-time.
 #
-# NOTES:
-#
-#   If Getopt::Long is installed:
-#     - Specify instances w/ --instances (multiple times or comma separated)
-#     - Specify default port w/ --port (defaults to 11211)
-#     - Specify sleep time w/ --sleep (default 3)
-#     - Specify color output w/ --color (default) or --nocolor
-#     - Specify lifetime stats w/ --lifetime or --nolifetime (default)
-#       NOTE: lifetime stats break thresholds for evictions, bytes.
-#     - Specify read and write bytes w/ --bytes (default) or --nobytes
-#     - Specify get and set commands w/ --commands or --nocommands (default)
-#     - Specify cumulative numbers w/ --cumulative (don't use with lifetime)
-#     - Run a single time without clearing the screen, good for scripts and 
-#       the like: --oneoff
-#
-#   If Getopt::Long is not installed:
-#     - Specify sleep time by typing a number after the command.
-#   Specify instances in @default_instances.
-#   Specify thresholds by defining %threshold.
-#   Written against memcached v 1.2.3, but works fine w/ later versions.
-#
-# HISTORY:
-#
-# v0.3 - 2009-04-22 - ntang
-#   Minor cleanups.  First release to google code:
-#   http://code.google.com/p/memcache-top/
-# v0.4 - 2009-04-23 - ntang
-#   Added ability to specify color, sleep time, and servers on command line.
-#   Also added checks for Getopt::Long and Term::ANSIColor.
-#   Added $default_port = "11211" and padding for short server names.  Server 
-#     names over 23 characters inc. port will break the column lineups for now.
-# v0.4b - 2009-04-23 - ntang
-#   Added total capacity, and changed "SERVER" to "INSTANCE" to be more clear.
-#     Server now is the hostname, instance is hostname + port.  It will
-#     truncate the instance and/or server to fit inside the first column
-#     correctly.  (Yay!)  It'll also truncate long reads/ writes (or
-#     technically any number) to K or M or G if it exceeds certain limits for
-#     readability.
-# v0.5 - 2009-04-24 - ntang
-#   Cleaned up instances vs. servers so it's internally consistent.
-#   Redid printing so that now it stores it all and only refreshes/ prints when
-#     it has the full set of data.  Warning: major hackishness.
-#   Switched to per-second stats by default w/ lifetime stats available.
-# v0.6 - 2009-04-28 - ntang
-#   I lied.  One more change... the ability to specify read/write bytes, or 
-#     get/set commands, or both.  Bear in mind if you specify both you will 
-#     exceed the width of a standard terminal!  You've been warned.  :P
-#   Also, some minor display changes, etc. etc.
+# Run with --help for full usage information.
 #
 ################################################################################
 
@@ -61,31 +14,31 @@ use IO::Socket;
 use Time::HiRes 'time';
 
 my (@default_instances, @instances, $remote, $sleep, %threshold, %laststats,
-    $usecolor, @keys, $default_port, $version, @out, $lifetime, $bytes, 
-    $commands, $cumulative, $oneoff);
+    $usecolor, @keys, $default_port, $version, @out, $lifetime, $bytes,
+    $commands, $cumulative, $oneoff, $sort_by, $help, $connect_timeout);
 
-$version = "0.7";
+$version = "1.0";
 
 ################################################################################
 # CONFIGURATION
 
-# Set $usecolor to 1 to push @out,in, gasp, color.
+# Set $usecolor to 1 to enable color output.
 $usecolor = 1;
 
 # 'Alert' threshold values at which to color the text red.
 %threshold = (
-    cache_hit		=> 60,		# Cache hit ratio
-    usage		=> 90,		# % space used
-    time		=> 5,		# Number of ms to run the stats query
-    curr_items  => 0,       # Number of items
-    evictions		=> 0,		# Number of evictions per second
-    curr_connections	=> 3500,	# Number of current connections
-    bytes_read		=> 1000000,	# Bytes read, per second
-    bytes_written	=> 1000000,	# Bytes written, per second
-    limit_maxbytes	=> 0,		# Total space allocated
-    bytes		=> 0,		# Total space used
-    cmd_get		=> 1000,	# Get commands
-    cmd_set		=> 1000,	# Set commands
+    cache_hit       => 60,       # Cache hit ratio (alert if below)
+    usage           => 90,       # % space used (alert if above)
+    time            => 5,        # Number of ms to run the stats query
+    curr_items      => 0,        # Number of items
+    evictions       => 0,        # Number of evictions per second
+    curr_connections => 3500,    # Number of current connections
+    bytes_read      => 1000000,  # Bytes read, per second
+    bytes_written   => 1000000,  # Bytes written, per second
+    limit_maxbytes  => 0,        # Total space allocated
+    bytes           => 0,        # Total space used
+    cmd_get         => 1000,     # Get commands
+    cmd_set         => 1000,     # Set commands
 );
 
 # Display lifetime stats instead of per-second stats
@@ -103,8 +56,14 @@ $cumulative = 0;
 # Default time to sleep in-between refreshes.
 $sleep = 3;
 
-# Run a single time as a one-off without formatting:
+# Run a single time as a one-off without formatting
 $oneoff = 0;
+
+# Connection timeout in seconds
+$connect_timeout = 2;
+
+# Sort by metric (empty = no sort, keeps original order)
+$sort_by = '';
 
 # List of servers/ ports to query.
 @default_instances = (
@@ -120,29 +79,44 @@ $default_port = "11211";
 @keys = ('usage', 'cache_hit', 'curr_connections', 'time', 'curr_items', 'cmd_get', 'cmd_set',
          'bytes_read', 'bytes_written', 'evictions', 'limit_maxbytes', 'bytes');
 
+my @valid_sort_keys = ('usage', 'hit', 'conn', 'time', 'items', 'evict', 'gets', 'sets', 'read', 'write');
+
+$help = 0;
+
 if (@ARGV) {
   eval { require Getopt::Long; };
   if ($@) {
     if ( $ARGV[0] =~ /^\d+$/ ) {
       $sleep = $ARGV[0];
     }
+    elsif ( $ARGV[0] eq '--help' || $ARGV[0] eq '-h' ) {
+      show_help();
+      exit 0;
+    }
     else {
-      die "USAGE: memcache-top.pl <optional number of seconds to sleep>\n";
+      die "USAGE: memcache-top <seconds to sleep>\nRun with --help for more information.\n";
     }
   }
   else {
     use Getopt::Long;
     GetOptions (
-      'instances=s'	=> \@instances,
-      'sleep=i'		=> \$sleep,
-      'port=i'		=> \$default_port,
-      'color!'		=> \$usecolor,
-      'lifetime!'	=> \$lifetime,
-      'bytes!'		=> \$bytes,
-      'commands!'	=> \$commands,
-      'cumulative!'	=> \$cumulative,
-      'oneoff'		=> \$oneoff,
+      'instances=s' => \@instances,
+      'sleep=i'     => \$sleep,
+      'port=i'      => \$default_port,
+      'color!'      => \$usecolor,
+      'lifetime!'   => \$lifetime,
+      'bytes!'      => \$bytes,
+      'commands!'   => \$commands,
+      'cumulative!' => \$cumulative,
+      'oneoff'      => \$oneoff,
+      'sort=s'      => \$sort_by,
+      'timeout=i'   => \$connect_timeout,
+      'help|h'      => \$help,
     );
+    if ($help) {
+      show_help();
+      exit 0;
+    }
     if (@instances) {
       @instances = split(/,/,join(',',@instances));
     } else {
@@ -158,6 +132,11 @@ if ( $lifetime && $cumulative ) {
   $lifetime = 0;
 }
 
+# Validate sort option
+if ( $sort_by && !grep { $_ eq $sort_by } @valid_sort_keys ) {
+  die "Invalid sort key '$sort_by'. Valid options: " . join(', ', @valid_sort_keys) . "\n";
+}
+
 if ( $usecolor ) {
   eval { require Term::ANSIColor; };
   if ($@) { $usecolor = 0; }
@@ -168,51 +147,98 @@ if ( $oneoff ) {
   $usecolor = 0;
 }
 
-my $i = 1;
+# Setup non-blocking keyboard input for interactive mode
+my $interactive = 0;
+unless ($oneoff) {
+  eval {
+    require POSIX;
+    POSIX->import(':termios_noncanon');
+  };
+  if (!$@) {
+    $interactive = 1;
+  }
+}
 
+# Column widths for aligned output
+my $col_instance = 24;
+my $col_data     = 9;
+
+my $i = 1;
 my (%original);
 
 while ($i) {
 
   @out = ();
 
-  unless ($oneoff) { push @out,"\033[2J"; }			# This clears the screen, yo.
+  unless ($oneoff) { push @out, "\033[2J\033[H"; }  # Clear screen and move cursor to top
 
-  push @out,color 'bold' if $usecolor;
-  push @out,"\nmemcache-top v$version\t";
-  push @out,color 'reset' if $usecolor;
-  push @out,"(default port: " . sprintf("%5d",$default_port) . ", color: ";
-  push @out,"on," if $usecolor;
-  push @out,"off," unless $usecolor;
-  push @out," refresh: $sleep seconds)\n\n";
-  push @out,color 'bold' if $usecolor;
-  push @out,"INSTANCE\t\tUSAGE\tHIT %\tCONN\tTIME\tITEMS\t";
+  # Header
+  push @out, color 'bold' if $usecolor;
+  push @out, "\n";
+  push @out, " memcache-top v$version";
+  push @out, color 'reset' if $usecolor;
+
+  my $mode = "per-second";
+  $mode = "lifetime" if $lifetime;
+  $mode = "cumulative" if $cumulative;
+
+  push @out, "  |  port: $default_port  |  refresh: ${sleep}s  |  mode: $mode";
+  push @out, "  |  sort: $sort_by" if $sort_by;
+  push @out, "\n";
+
+  # Separator line
+  my $total_width = $col_instance + ($col_data * 6);
+  $total_width += ($col_data * 2) if $commands;
+  $total_width += ($col_data * 2) if $bytes;
+  my $sep = " " . ("-" x $total_width);
+  push @out, $sep . "\n";
+
+  # Column headers
+  push @out, color 'bold' if $usecolor;
+  push @out, sprintf(" %-${col_instance}s", "INSTANCE");
+  push @out, sprintf("%${col_data}s", "USAGE");
+  push @out, sprintf("%${col_data}s", "HIT %");
+  push @out, sprintf("%${col_data}s", "CONN");
+  push @out, sprintf("%${col_data}s", "TIME");
+  push @out, sprintf("%${col_data}s", "ITEMS");
   if ( $lifetime || $cumulative ) {
-    push @out,"EVICT\t";
-    push @out,"GETS\tSETS\t" if $commands;
-    push @out,"READ\tWRITE\t" if $bytes;
-    push @out,"\n";
+    push @out, sprintf("%${col_data}s", "EVICT");
+    if ($commands) {
+      push @out, sprintf("%${col_data}s", "GETS");
+      push @out, sprintf("%${col_data}s", "SETS");
+    }
+    if ($bytes) {
+      push @out, sprintf("%${col_data}s", "READ");
+      push @out, sprintf("%${col_data}s", "WRITE");
+    }
   } else {
-    push @out,"EVICT/s ";
-    push @out,"GETS/s\tSETS/s\t" if $commands;
-    push @out,"READ/s\tWRITE/s\t" if $bytes;
-    push @out,"\n";
+    push @out, sprintf("%${col_data}s", "EVICT/s");
+    if ($commands) {
+      push @out, sprintf("%${col_data}s", "GETS/s");
+      push @out, sprintf("%${col_data}s", "SETS/s");
+    }
+    if ($bytes) {
+      push @out, sprintf("%${col_data}s", "READ/s");
+      push @out, sprintf("%${col_data}s", "WRITE/s");
+    }
   }
-  push @out,color 'reset' if $usecolor;
+  push @out, "\n";
+  push @out, color 'reset' if $usecolor;
+  push @out, $sep . "\n";
 
   my %tot;
-
   foreach my $key (@keys) {
     $tot{$key} = 0;
   }
-  
+
   my $count = 0;
+  my @instance_rows;  # For sorting support
 
   foreach my $instance (@instances) {
 
     my ($port, $server);
 
-    my @split = split(/:/,$instance);
+    my @split = split(/:/, $instance);
     unless ( $split[1] ) {
       $instance = $instance . ":" . $default_port;
       $port = $default_port;
@@ -221,26 +247,15 @@ while ($i) {
       $port = $split[1];
     }
 
-# Some exhaustive (exhausting?) logic to determine the ideal text to push @out,for
-# the server name.
-    if ( length($instance) > 22 ) {
+    # Determine display name for the instance
+    my $max_len = $col_instance - 1;
+    if ( length($instance) > $max_len ) {
       if ( $port ne $default_port ) {
-        $server = substr($split[0],0,17) . ":" . $port;
+        $server = substr($split[0], 0, $max_len - length($port) - 1) . ":" . $port;
       }
       else {
-        if ( length($split[0]) < 18 ) {
-          $server = $instance;
-        }
-        else {
-          $server = substr($split[0],0,23);
-        }
+        $server = substr($split[0], 0, $max_len);
       }
-    }
-    elsif ( length($instance) < 8 ) {
-      $server = "$instance\t\t";
-    }
-    elsif ( length($instance) < 16 ) {
-      $server = "$instance\t";
     }
     else {
       $server = $instance;
@@ -248,13 +263,17 @@ while ($i) {
 
     my $t0 = time();
 
-    $remote = IO::Socket::INET->new($instance);
-    unless ( defined($remote) ) { 
-      push @out,color 'red' if $usecolor;
-      push @out,$instance . " is DOWN.\n";
+    $remote = IO::Socket::INET->new(
+      PeerAddr => $instance,
+      Timeout  => $connect_timeout,
+    );
+    unless ( defined($remote) ) {
+      push @out, color 'red' if $usecolor;
+      push @out, sprintf(" %-${col_instance}s", $server);
+      push @out, " DOWN - connection failed\n";
+      push @out, color 'reset' if $usecolor;
       $count++;
-      push @out,color 'reset' if $usecolor;
-      next; 
+      next;
     }
 
     $remote->autoflush(1);
@@ -271,7 +290,8 @@ while ($i) {
     LINE: while ( defined ( my $line = <$remote> ) ) {
       last LINE if ( $line =~ /END/ );
       chomp $line;
-      my @bits = split(' ',$line);
+      my @bits = split(' ', $line);
+      next LINE unless defined $bits[1] && defined $bits[2];
       $stats{$bits[1]} = $bits[2];
       next LINE;
     }
@@ -280,6 +300,9 @@ while ($i) {
 
     my $t1 = time();
     $outstats{time} = ($t1 - $t0) * 1000;
+
+    # Guard against division by zero
+    my $cmd_get_safe = ($stats{cmd_get} || 1);
 
     if ( $lifetime || $cumulative) {
       foreach my $key ('cmd_get', 'cmd_set', 'get_hits', 'get_misses', 'evictions', 'bytes_read', 'bytes_written') {
@@ -293,7 +316,7 @@ while ($i) {
           $outstats{$key} = $stats{$key};
         }
       }
-      $outstats{cache_hit} = ( $stats{get_hits} / $stats{cmd_get} ) * 100;
+      $outstats{cache_hit} = ( $stats{get_hits} / $cmd_get_safe ) * 100;
     } else {
       foreach my $key ('cmd_get', 'cmd_set', 'get_hits', 'get_misses', 'evictions', 'bytes_read', 'bytes_written') {
         if ( defined ( $laststats{$instance}{$key} ) ) {
@@ -301,16 +324,20 @@ while ($i) {
         }
       }
       $outstats{cache_hit} = 0;
-      if ( defined($outstats{get_misses}) && $outstats{get_misses} > 0 ) {
+      if ( defined($laststats{$instance}{cmd_get}) && $laststats{$instance}{cmd_get} > 0 ) {
         $outstats{cache_hit} = ( $laststats{$instance}{get_hits} / $laststats{$instance}{cmd_get} ) * 100;
       }
     }
 
-    $outstats{limit_maxbytes} = $stats{limit_maxbytes};
-    $outstats{bytes} = $stats{bytes};
-    $outstats{usage} = ( $stats{bytes} / $stats{limit_maxbytes} * 100 );
-    $outstats{curr_connections} = $stats{curr_connections};
-    $outstats{curr_items} = $stats{curr_items};
+    $outstats{limit_maxbytes} = $stats{limit_maxbytes} || 0;
+    $outstats{bytes} = $stats{bytes} || 0;
+    if ( $outstats{limit_maxbytes} > 0 ) {
+      $outstats{usage} = ( $stats{bytes} / $stats{limit_maxbytes} * 100 );
+    } else {
+      $outstats{usage} = 0;
+    }
+    $outstats{curr_connections} = $stats{curr_connections} || 0;
+    $outstats{curr_items} = $stats{curr_items} || 0;
 
     if ( $cumulative ) {
       foreach my $key ('cmd_get', 'cmd_set', 'get_hits', 'get_misses', 'evictions', 'bytes_read', 'bytes_written') {
@@ -318,26 +345,29 @@ while ($i) {
       }
     }
 
-    push @out,"$server\t";
-    threshold_print( $outstats{usage}, $threshold{usage}, 1, 0, '%', '%.1f');
-    threshold_print( $outstats{cache_hit}, $threshold{cache_hit}, 0, 0, '%', '%.1f');
-    threshold_print( $outstats{curr_connections}, $threshold{curr_connections}, 1, 0, '', '%.0d');
+    # Build row data for this instance
+    my @row_out;
+    push @row_out, sprintf(" %-${col_instance}s", $server);
+    push @row_out, format_stat($outstats{usage}, $threshold{usage}, 1, 0, '%', '%.1f');
+    push @row_out, format_stat($outstats{cache_hit}, $threshold{cache_hit}, 0, 0, '%', '%.1f');
+    push @row_out, format_stat($outstats{curr_connections}, $threshold{curr_connections}, 1, 0, '', '%.0d');
     if ( $outstats{time} >= 1000 ) {
-      threshold_print( $outstats{time}/1000, $threshold{time}/1000, 1, 0, 's', '%.2f');
+      push @row_out, format_stat($outstats{time}/1000, $threshold{time}/1000, 1, 0, 's', '%.2f');
     } else {
-      threshold_print( $outstats{time}, $threshold{time}, 1, 0, 'ms', '%.1f');
+      push @row_out, format_stat($outstats{time}, $threshold{time}, 1, 0, 'ms', '%.1f');
     }
-    threshold_print( $outstats{curr_items}, $threshold{curr_items}, 1, 0, '', '%.0d');
-    threshold_print( $outstats{evictions}, $threshold{evictions}, 1, 0, '', '%.1f');
+    push @row_out, format_stat($outstats{curr_items}, $threshold{curr_items}, 1, 0, '', '%.0d');
+    push @row_out, format_stat($outstats{evictions}, $threshold{evictions}, 1, 0, '', '%.1f');
     if ( $commands ) {
-      threshold_print( $outstats{cmd_get}, $threshold{cmd_get}, 1, 0, '', '%.0f');
-      threshold_print( $outstats{cmd_set}, $threshold{cmd_set}, 1, 0, '', '%.0f');
+      push @row_out, format_stat($outstats{cmd_get}, $threshold{cmd_get}, 1, 0, '', '%.0f');
+      push @row_out, format_stat($outstats{cmd_set}, $threshold{cmd_set}, 1, 0, '', '%.0f');
     }
     if ( $bytes ) {
-      threshold_print( $outstats{bytes_read}, $threshold{bytes_read}, 1, 0, '', '%.0f');
-      threshold_print( $outstats{bytes_written}, $threshold{bytes_written}, 1, 0, '', '%.0f');
+      push @row_out, format_stat($outstats{bytes_read}, $threshold{bytes_read}, 1, 0, '', '%.0f');
+      push @row_out, format_stat($outstats{bytes_written}, $threshold{bytes_written}, 1, 0, '', '%.0f');
     }
-    push @out,"\n";
+
+    push @instance_rows, { text => join('', @row_out), stats => {%outstats} };
 
     foreach my $key (@keys) {
       $tot{$key} = $tot{$key} + $outstats{$key};
@@ -351,52 +381,144 @@ while ($i) {
 
   }
 
-  push @out,color 'bold' if $usecolor;
-  push @out,"\nAVERAGE:\t\t";
-  threshold_print( $tot{usage}/$count, $threshold{usage}, 1, 1, '%', '%.1f');
-  threshold_print( $tot{cache_hit}/$count, $threshold{cache_hit}, 0, 1, '%', '%.1f');
-  threshold_print( $tot{curr_connections}/$count, $threshold{curr_connections}, 1, 1, '', '%.0d');
-  if ( ( $tot{time}/$count ) >= 1000 ) {
-    threshold_print( ($tot{time}/$count)/1000, $threshold{time}/1000, 1, 1, 's', '%.2f');
-  } else { 
-    threshold_print( $tot{time}/$count, $threshold{time}, 1, 1, 'ms', '%.1f');
+  # Sort instances if requested
+  if ($sort_by && @instance_rows) {
+    my %sort_key_map = (
+      'usage' => 'usage',
+      'hit'   => 'cache_hit',
+      'conn'  => 'curr_connections',
+      'time'  => 'time',
+      'items' => 'curr_items',
+      'evict' => 'evictions',
+      'gets'  => 'cmd_get',
+      'sets'  => 'cmd_set',
+      'read'  => 'bytes_read',
+      'write' => 'bytes_written',
+    );
+    my $sk = $sort_key_map{$sort_by} || 'usage';
+    @instance_rows = sort { $b->{stats}{$sk} <=> $a->{stats}{$sk} } @instance_rows;
   }
-  threshold_print( $tot{curr_items}/$count, $threshold{curr_items}, 1, 1, '', '%.0d');
-  threshold_print( $tot{evictions}/$count, $threshold{evictions}, 1, 1, '', '%.1f');
-  if ( $commands ) {
-    threshold_print( $tot{cmd_get}/$count, $threshold{cmd_get}, 1, 1, '', '%.0f');
-    threshold_print( $tot{cmd_set}/$count, $threshold{cmd_set}, 1, 1, '', '%.0f');
+
+  # Output sorted instance rows
+  foreach my $row (@instance_rows) {
+    push @out, $row->{text} . "\n";
   }
-  if ( $bytes ) {
-    threshold_print( $tot{bytes_read}/$count, $threshold{bytes_read}, 1, 1, '', '%.0f');
-    threshold_print( $tot{bytes_written}/$count, $threshold{bytes_written}, 1, 1, '', '%.0f');
+
+  # Summary section
+  if ($count > 0) {
+    push @out, $sep . "\n";
+    push @out, color 'bold' if $usecolor;
+
+    # AVERAGE row
+    push @out, sprintf(" %-${col_instance}s", "AVERAGE");
+    push @out, format_stat($tot{usage}/$count, $threshold{usage}, 1, 1, '%', '%.1f');
+    push @out, format_stat($tot{cache_hit}/$count, $threshold{cache_hit}, 0, 1, '%', '%.1f');
+    push @out, format_stat($tot{curr_connections}/$count, $threshold{curr_connections}, 1, 1, '', '%.0d');
+    if ( ( $tot{time}/$count ) >= 1000 ) {
+      push @out, format_stat(($tot{time}/$count)/1000, $threshold{time}/1000, 1, 1, 's', '%.2f');
+    } else {
+      push @out, format_stat($tot{time}/$count, $threshold{time}, 1, 1, 'ms', '%.1f');
+    }
+    push @out, format_stat($tot{curr_items}/$count, $threshold{curr_items}, 1, 1, '', '%.0d');
+    push @out, format_stat($tot{evictions}/$count, $threshold{evictions}, 1, 1, '', '%.1f');
+    if ( $commands ) {
+      push @out, format_stat($tot{cmd_get}/$count, $threshold{cmd_get}, 1, 1, '', '%.0f');
+      push @out, format_stat($tot{cmd_set}/$count, $threshold{cmd_set}, 1, 1, '', '%.0f');
+    }
+    if ( $bytes ) {
+      push @out, format_stat($tot{bytes_read}/$count, $threshold{bytes_read}, 1, 1, '', '%.0f');
+      push @out, format_stat($tot{bytes_written}/$count, $threshold{bytes_written}, 1, 1, '', '%.0f');
+    }
+    push @out, "\n";
+
+    # TOTAL row
+    push @out, sprintf(" %-${col_instance}s", "TOTAL");
+    push @out, format_stat($tot{bytes}, $threshold{bytes}, 0, 1, 'B/', '%.0f');
+    push @out, format_stat($tot{limit_maxbytes}, $threshold{limit_maxbytes}, 0, 1, 'B', '%.0f');
+    push @out, format_stat($tot{curr_connections}, $threshold{curr_connections}*$count, 1, 1, '', '%.0d');
+    if ( $tot{time} >= 1000 ) {
+      push @out, format_stat($tot{time}/1000, ($threshold{time}*$count)/1000, 1, 1, 's', '%.2f');
+    } else {
+      push @out, format_stat($tot{time}, $threshold{time}*$count, 1, 1, 'ms', '%.1f');
+    }
+    push @out, format_stat($tot{curr_items}, $threshold{curr_items}*$count, 1, 1, '', '%.0d');
+    push @out, format_stat($tot{evictions}, $threshold{evictions}*$count, 1, 1, '', '%.1f');
+    if ( $commands ) {
+      push @out, format_stat($tot{cmd_get}, $threshold{cmd_get}*$count, 1, 1, '', '%.0f');
+      push @out, format_stat($tot{cmd_set}, $threshold{cmd_set}*$count, 1, 1, '', '%.0f');
+    }
+    if ( $bytes ) {
+      push @out, format_stat($tot{bytes_read}, $threshold{bytes_read}*$count, 1, 1, '', '%.0f');
+      push @out, format_stat($tot{bytes_written}, $threshold{bytes_written}*$count, 1, 1, '', '%.0f');
+    }
+    push @out, color 'reset' if $usecolor;
+    push @out, "\n";
   }
-  push @out,"\n";
-  push @out,"\nTOTAL:\t\t";
-  threshold_print( $tot{bytes}, $threshold{bytes}, 0, 1, 'B/', '%.0f');
-  threshold_print( $tot{limit_maxbytes}, $threshold{limit_maxbytes}, 0, 1, "B\t", '%.0f');
-  threshold_print( $tot{curr_connections}, $threshold{curr_connections}*$count, 1, 1, '', '%.0d');
-  if ( $tot{time} >= 1000 ) {
-    threshold_print( $tot{time}/1000, ($threshold{time}*$count)/1000, 1, 1, 's', '%.2f');
-  } else {
-    threshold_print( $tot{time}, $threshold{time}*$count, 1, 1, 'ms', '%.1f');
+
+  unless ($oneoff) {
+    push @out, "\n Press: ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "q";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=quit  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "c";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=color  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "b";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=bytes  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "g";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=cmds  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "+/-";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=interval  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "l";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=lifetime  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "h";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=help\n";
   }
-  threshold_print( $tot{curr_items}, $threshold{curr_items}*$count, 1, 1, '', '%.0d');
-  threshold_print( $tot{evictions}, $threshold{evictions}*$count, 1, 1, '', '%.1f');
-  if ( $commands ) {
-    threshold_print( $tot{cmd_get}, $threshold{cmd_get}*$count, 1, 1, '', '%.0f');
-    threshold_print( $tot{cmd_set}, $threshold{cmd_set}*$count, 1, 1, '', '%.0f');
-  }
-  if ( $bytes ) {
-    threshold_print( $tot{bytes_read}, $threshold{bytes_read}*$count, 1, 1, '', '%.0f');
-    threshold_print( $tot{bytes_written}, $threshold{bytes_written}*$count, 1, 1, '', '%.0f');
-  }
-  push @out,color 'reset' if $usecolor;
-  push @out,"\n";
-  unless ($oneoff) { push @out,"(ctrl-c to quit.)\n"; }
-  sleep($sleep);
 
   print @out;
+
+  # Handle keyboard input during sleep
+  if (!$oneoff) {
+    my $key = timed_read_key($sleep);
+    if (defined $key) {
+      if ($key eq 'q' || $key eq 'Q') {
+        print "\n";
+        exit 0;
+      } elsif ($key eq 'c' || $key eq 'C') {
+        $usecolor = !$usecolor;
+        if ($usecolor) {
+          eval { require Term::ANSIColor; };
+          if ($@) { $usecolor = 0; }
+        }
+      } elsif ($key eq 'b' || $key eq 'B') {
+        $bytes = !$bytes;
+      } elsif ($key eq 'g' || $key eq 'G') {
+        $commands = !$commands;
+      } elsif ($key eq 'l' || $key eq 'L') {
+        $lifetime = !$lifetime;
+        $cumulative = 0 if $lifetime;
+      } elsif ($key eq '+' || $key eq '=') {
+        $sleep++ if $sleep < 60;
+      } elsif ($key eq '-' || $key eq '_') {
+        $sleep-- if $sleep > 1;
+      } elsif ($key eq 'h' || $key eq 'H' || $key eq '?') {
+        show_interactive_help();
+      }
+    }
+  }
+
   $i++;
 
   if ($oneoff) { exit 0; }
@@ -404,31 +526,26 @@ while ($i) {
 }
 
 ################################################################################
-# threshold_print
-# takes two variables, compares them (greater than if $gt == 1), and then prints
-# it.  It uses red as the default color for successful comparisons, but sets 
-# it to red bold if $bold == 1.  $trail specifies trailing characters to print.
-# $sprintf lets you specify the format for sprintf().
+# format_stat
+# Formats a stat value with threshold coloring and proper column alignment.
 #
-sub threshold_print { 
+sub format_stat {
 
   my ($stat, $threshold, $gt, $bold, $trail, $sprintf) = @_;
 
+  my $result = '';
   my $color = 'red';
   my $offcolor = 'reset';
   if ( $bold ) {
     $color = 'bold red';
     $offcolor = 'reset bold';
-  } 
+  }
 
+  my $colored = 0;
   if ( $gt ) {
-    if ( $stat > $threshold ) {
-      push @out, color $color if $usecolor;
-    }
+    if ( $stat > $threshold ) { $colored = 1; }
   } else {
-    if ( $stat < $threshold ) {
-      push @out, color $color if $usecolor;
-    }
+    if ( $stat < $threshold ) { $colored = 1; }
   }
 
   if ( $stat > 999999999999 ) {
@@ -448,9 +565,159 @@ sub threshold_print {
     $trail = 'K' . $trail;
     $sprintf = '%.1f';
   }
-  
-  push @out,sprintf($sprintf,$stat) . $trail;
-  push @out,color $offcolor if $usecolor;
-  push @out,"\t";
+
+  my $formatted = sprintf($sprintf, $stat) . $trail;
+
+  $result .= color $color if ($usecolor && $colored);
+  $result .= sprintf("%${col_data}s", $formatted);
+  $result .= color $offcolor if ($usecolor && $colored);
+
+  return $result;
 }
+
+################################################################################
+# timed_read_key
+# Reads a single keypress with timeout. Returns the key or undef on timeout.
+#
+sub timed_read_key {
+  my ($timeout) = @_;
+
+  my $key;
+  eval {
+    # Try using Term::ReadKey if available
+    eval { require Term::ReadKey; };
+    if (!$@) {
+      Term::ReadKey::ReadMode('cbreak');
+      my $start = time();
+      while (time() - $start < $timeout) {
+        $key = Term::ReadKey::ReadKey(0.1);
+        last if defined $key;
+      }
+      Term::ReadKey::ReadMode('restore');
+    } else {
+      # Fallback: use select() on STDIN
+      my $rin = '';
+      vec($rin, fileno(STDIN), 1) = 1;
+      my $remaining = $timeout;
+      my $start = time();
+      while ($remaining > 0) {
+        my $ready = select(my $rout = $rin, undef, undef, 0.1);
+        if ($ready > 0) {
+          # Set terminal to non-canonical mode
+          system("stty -icanon -echo min 1 time 0 2>/dev/null");
+          sysread(STDIN, $key, 1);
+          system("stty icanon echo 2>/dev/null");
+          last;
+        }
+        $remaining = $timeout - (time() - $start);
+      }
+      if (!defined $key) {
+        # Just slept the timeout, no key pressed
+      }
+    }
+  };
+  if ($@) {
+    # If keyboard reading fails, just sleep
+    sleep($timeout);
+  }
+
+  return $key;
+}
+
+################################################################################
+# show_help
+# Displays the full help/usage message and exits.
+#
+sub show_help {
+  print <<'HELP';
+
+  memcache-top - real-time monitoring for memcached instances
+
+  USAGE:
+    memcache-top [OPTIONS]
+    memcache-top <seconds>          (if Getopt::Long is not available)
+
+  OPTIONS:
+    -h, --help                 Show this help message
+    --instances <host:port>    Memcached instances to monitor
+                               (comma-separated or specify multiple times)
+    --port <num>               Default port (default: 11211)
+    --sleep <seconds>          Refresh interval (default: 3)
+    --timeout <seconds>        Connection timeout (default: 2)
+    --color / --nocolor        Enable/disable colored output (default: on)
+    --lifetime / --nolifetime  Show lifetime stats vs per-second (default: off)
+    --bytes / --nobytes        Show read/write bytes (default: on)
+    --commands / --nocommands  Show get/set commands (default: off)
+    --cumulative               Show cumulative stats since start
+    --sort <key>               Sort instances by metric (descending)
+                               Keys: usage, hit, conn, time, items,
+                                     evict, gets, sets, read, write
+    --oneoff                   Run once without screen clearing
+
+  INTERACTIVE KEYS (during monitoring):
+    q       Quit
+    c       Toggle color on/off
+    b       Toggle bytes display
+    g       Toggle get/set commands display
+    l       Toggle lifetime stats
+    +/-     Increase/decrease refresh interval
+    h, ?    Show interactive help
+
+  EXAMPLES:
+    memcache-top
+    memcache-top --instances 10.0.0.1:11211,10.0.0.2:11211
+    memcache-top --sleep 5 --commands --sort usage
+    memcache-top --instances server1 --port 11211 --lifetime
+    memcache-top --oneoff --nocolor    (for scripting)
+
+  THRESHOLDS:
+    Values exceeding configured thresholds are highlighted in red.
+    Edit the %threshold hash in the script to customize alert levels.
+
+HELP
+}
+
+################################################################################
+# show_interactive_help
+# Displays a help overlay during interactive mode.
+#
+sub show_interactive_help {
+  print "\033[2J\033[H";  # Clear screen
+  print <<'IHELP';
+
+  memcache-top - Interactive Help
+  ================================
+
+  Keyboard shortcuts:
+
+    q       Quit the monitor
+    c       Toggle color output on/off
+    b       Toggle bytes (READ/WRITE) columns
+    g       Toggle commands (GETS/SETS) columns
+    l       Toggle lifetime stats mode
+    +/=     Increase refresh interval by 1 second
+    -/_     Decrease refresh interval by 1 second (min: 1s)
+    h/?     Show this help screen
+
+  Column descriptions:
+
+    USAGE   - Memory usage percentage
+    HIT %   - Cache hit ratio (higher is better)
+    CONN    - Current active connections
+    TIME    - Stats query response time
+    ITEMS   - Current items stored in cache
+    EVICT/s - Evictions per second (or total in lifetime mode)
+    GETS/s  - GET commands per second
+    SETS/s  - SET commands per second
+    READ/s  - Bytes read per second
+    WRITE/s - Bytes written per second
+
+  Values in RED indicate they have exceeded the configured threshold.
+
+  Press any key to return to monitoring...
+IHELP
+  # Wait for any keypress
+  my $dummy = timed_read_key(30);
+}
+
 ################################################################################
