@@ -1,33 +1,37 @@
 services:
 
-  # ── Memcached instance ──────────────────────────────────────────────
+  # ── Memcached (local, para desenvolvimento/teste) ────────────────
   memcached:
     image: memcached:latest
     ports:
       - "11211:11211"
     command: ["-m", "64"]
+    profiles:
+      - local
 
-  # ── Terminal monitor (interactive) ──────────────────────────────────
+  # ── Terminal monitor (interativo) ─────────────────────────────────
   memcache-top:
     build: .
-    depends_on:
-      - memcached
-    command: ["--instances", "memcached:11211", "--sleep", "3", "--color"]
+    command: ["--instances", "${MEMCACHED_HOSTS:-memcached:11211}", "--sleep", "3", "--color"]
     tty: true
     stdin_open: true
     profiles:
       - monitor
 
-  # ── Prometheus exporter ─────────────────────────────────────────────
+  # ── Prometheus exporter ───────────────────────────────────────────
+  # Aponta para o memcached remoto via MEMCACHED_HOSTS
+  #
+  #   MEMCACHED_HOSTS=10.0.1.50:11211 docker compose up memcache-exporter
+  #   MEMCACHED_HOSTS=mc1:11211,mc2:11211 docker compose up memcache-exporter
+  #
   memcache-exporter:
     build: .
-    depends_on:
-      - memcached
-    command: ["--instances", "memcached:11211", "--prometheus", "9150"]
+    command: ["--instances", "${MEMCACHED_HOSTS:-127.0.0.1:11211}", "--prometheus", "9150"]
     ports:
-      - "9150:9150"
+      - "${EXPORTER_PORT:-9150}:9150"
+    restart: unless-stopped
 
-  # ── Prometheus ──────────────────────────────────────────────────────
+  # ── Stack completa (Prometheus + Grafana) para quem não tem ──────
   prometheus:
     image: prom/prometheus:latest
     depends_on:
@@ -36,8 +40,9 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
+    profiles:
+      - full-stack
 
-  # ── Grafana ─────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     depends_on:
@@ -52,3 +57,5 @@ services:
       - ./grafana/dashboard.json:/var/lib/grafana/dashboards/memcached.json:ro
     ports:
       - "3000:3000"
+    profiles:
+      - full-stack

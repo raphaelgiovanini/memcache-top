@@ -107,42 +107,50 @@ Grafana Integration
 
 memcache-top includes a built-in Prometheus exporter and a pre-configured Grafana dashboard.
 
-Option 1: Full Stack with Docker Compose
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Exporter para Prometheus/Grafana Existente
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Se você já tem Prometheus e Grafana rodando, só precisa do exporter apontando para o memcached remoto:
+
+**Opção A: Docker (recomendado)**
 
 .. code-block:: bash
 
-   docker compose up
+   # Memcached em uma máquina remota (ex: 10.0.1.50)
+   MEMCACHED_HOSTS=10.0.1.50:11211 docker compose up memcache-exporter
 
-This starts:
+   # Múltiplas instâncias
+   MEMCACHED_HOSTS=10.0.1.50:11211,10.0.1.51:11211 docker compose up memcache-exporter
 
-- **memcached** on port ``11211``
-- **memcache-top exporter** on port ``9150`` (Prometheus metrics)
-- **Prometheus** on port ``9090`` (scrapes the exporter)
-- **Grafana** on port ``3000`` (pre-configured dashboard)
+   # Porta customizada do exporter
+   MEMCACHED_HOSTS=10.0.1.50:11211 EXPORTER_PORT=9150 docker compose up memcache-exporter
 
-Open **http://localhost:3000** (login: ``admin`` / ``admin``) and the dashboard is already there.
-
-Option 2: Exporter Only (Existing Infrastructure)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-If you already have Prometheus and Grafana running:
+**Opção B: Direto (sem Docker)**
 
 .. code-block:: bash
 
-   # Start the exporter
-   memcache-top --instances your-memcached:11211 --prometheus 9150
+   memcache-top --instances 10.0.1.50:11211 --prometheus 9150
 
-Add this to your ``prometheus.yml``:
+Depois, adicione no seu ``prometheus.yml`` existente:
 
 .. code-block:: yaml
 
    scrape_configs:
      - job_name: 'memcache-top'
        static_configs:
-         - targets: ['your-host:9150']
+         - targets: ['<ip-do-exporter>:9150']
 
-Then import ``grafana/dashboard.json`` into Grafana (Dashboards → Import → Upload JSON).
+E importe ``grafana/dashboard.json`` no Grafana (Dashboards → Import → Upload JSON).
+
+Stack Completa (para quem não tem Prometheus/Grafana)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   # Stack completa com Prometheus + Grafana + memcached local
+   docker compose --profile full-stack --profile local up
+
+Abra **http://localhost:3000** (login: ``admin`` / ``admin``) e o dashboard já aparece.
 
 Dashboard Panels
 ~~~~~~~~~~~~~~~~
