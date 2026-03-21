@@ -9,23 +9,77 @@ Features
 - Real-time stats: usage, hit ratio, connections, latency, items, evictions
 - Color-coded alerts when metrics exceed configurable thresholds
 - Interactive keyboard controls (toggle columns, change refresh rate, etc.)
+- Key lookup and dump: search cache by key name, list all keys
 - Sort instances by any metric
 - Support for multiple memcached instances
 - Per-second, lifetime, or cumulative stat modes
-- Docker support for easy deployment
-- Single-file Perl script with minimal dependencies
+- Single-file Perl script, installs as a native Linux command
+- Docker support included
 
-Quick Start
------------
+Installation
+------------
 
-**Run directly:**
+**One-line install (recommended):**
 
 .. code-block:: bash
 
-   chmod +x memcache-top
-   ./memcache-top
+   # Install as system command (to /usr/local/bin)
+   ./install.sh
 
-**Run with Docker:**
+   # Now use it anywhere:
+   memcache-top
+
+**Custom install location (no root needed):**
+
+.. code-block:: bash
+
+   # Install to your home directory
+   ./install.sh --bindir ~/.local/bin
+
+   # Or with a custom prefix
+   ./install.sh --prefix /opt
+
+**Using make:**
+
+.. code-block:: bash
+
+   make install                    # Install to /usr/local/bin
+   sudo make install               # With root if needed
+   make install PREFIX=/opt        # Custom prefix
+   make uninstall                  # Remove
+
+**Install inside any Docker container:**
+
+.. code-block:: dockerfile
+
+   # Add to your own Dockerfile
+   COPY memcache-top /usr/local/bin/memcache-top
+   COPY install.sh /tmp/install.sh
+   RUN chmod +x /tmp/install.sh && /tmp/install.sh && rm /tmp/install.sh
+
+Or in a running container:
+
+.. code-block:: bash
+
+   docker cp memcache-top mycontainer:/usr/local/bin/
+   docker cp install.sh mycontainer:/tmp/
+   docker exec mycontainer bash -c "chmod +x /tmp/install.sh && /tmp/install.sh"
+
+**Verify / check dependencies:**
+
+.. code-block:: bash
+
+   ./install.sh --check
+
+**Uninstall:**
+
+.. code-block:: bash
+
+   ./install.sh --uninstall
+   # or
+   make uninstall
+
+**Using the Docker image:**
 
 .. code-block:: bash
 
@@ -36,11 +90,20 @@ Quick Start
    docker build -t memcache-top .
    docker run -it --network host memcache-top --instances 127.0.0.1:11211
 
-**Show help:**
+Quick Start
+-----------
 
 .. code-block:: bash
 
-   ./memcache-top --help
+   # After installation, just run:
+   memcache-top
+
+   # Or run directly without installing:
+   chmod +x memcache-top
+   ./memcache-top
+
+   # Show help:
+   memcache-top --help
 
 Usage
 -----
@@ -99,22 +162,22 @@ Examples
 .. code-block:: bash
 
    # Monitor default localhost:11211
-   ./memcache-top
+   memcache-top
 
    # Monitor multiple instances, sorted by usage
-   ./memcache-top --instances 10.0.0.1:11211,10.0.0.2:11211 --sort usage
+   memcache-top --instances 10.0.0.1:11211,10.0.0.2:11211 --sort usage
 
    # Fast refresh with all columns
-   ./memcache-top --sleep 1 --commands --bytes
+   memcache-top --sleep 1 --commands --bytes
 
    # Look up a specific key
-   ./memcache-top --get session:user123
+   memcache-top --get session:user123
 
    # List all cached keys
-   ./memcache-top --dump
+   memcache-top --dump
 
    # Lifetime stats, no color (for logging)
-   ./memcache-top --lifetime --nocolor --oneoff >> stats.log
+   memcache-top --lifetime --nocolor --oneoff >> stats.log
 
    # Docker: monitor a remote memcached
    docker run -it --network host memcache-top --instances 192.168.1.100:11211
@@ -163,6 +226,8 @@ Requirements
 - ``IO::Socket`` (core module)
 - ``Time::HiRes`` (core module)
 - Optional: ``Getopt::Long`` (for CLI options), ``Term::ANSIColor`` (for colors), ``Term::ReadKey`` (for interactive keys)
+
+The installer automatically checks and installs optional dependencies.
 
 License
 -------
