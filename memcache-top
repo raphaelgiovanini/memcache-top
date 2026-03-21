@@ -15,9 +15,10 @@ use Time::HiRes 'time';
 
 my (@default_instances, @instances, $remote, $sleep, %threshold, %laststats,
     $usecolor, @keys, $default_port, $version, @out, $lifetime, $bytes,
-    $commands, $cumulative, $oneoff, $sort_by, $help, $connect_timeout);
+    $commands, $cumulative, $oneoff, $sort_by, $help, $connect_timeout,
+    $get_key, $dump_keys);
 
-$version = "1.0";
+$version = "1.1";
 
 ################################################################################
 # CONFIGURATION
@@ -65,6 +66,12 @@ $connect_timeout = 2;
 # Sort by metric (empty = no sort, keeps original order)
 $sort_by = '';
 
+# Key to look up (empty = no lookup, monitor mode)
+$get_key = '';
+
+# Dump all keys
+$dump_keys = 0;
+
 # List of servers/ ports to query.
 @default_instances = (
   '127.0.0.1:11211',
@@ -111,6 +118,8 @@ if (@ARGV) {
       'oneoff'      => \$oneoff,
       'sort=s'      => \$sort_by,
       'timeout=i'   => \$connect_timeout,
+      'get=s'       => \$get_key,
+      'dump'        => \$dump_keys,
       'help|h'      => \$help,
     );
     if ($help) {
@@ -145,6 +154,18 @@ if ( $usecolor ) {
 
 if ( $oneoff ) {
   $usecolor = 0;
+}
+
+# Handle --get (key lookup) mode
+if ( $get_key ) {
+  cache_get(\@instances, $get_key);
+  exit 0;
+}
+
+# Handle --dump (list all keys) mode
+if ( $dump_keys ) {
+  cache_dump_keys(\@instances);
+  exit 0;
 }
 
 # Setup non-blocking keyboard input for interactive mode
@@ -482,6 +503,14 @@ while ($i) {
     push @out, color 'reset' if $usecolor;
     push @out, "=lifetime  ";
     push @out, color 'bold' if $usecolor;
+    push @out, "/";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=search  ";
+    push @out, color 'bold' if $usecolor;
+    push @out, "d";
+    push @out, color 'reset' if $usecolor;
+    push @out, "=dump  ";
+    push @out, color 'bold' if $usecolor;
     push @out, "h";
     push @out, color 'reset' if $usecolor;
     push @out, "=help\n";
@@ -513,6 +542,10 @@ while ($i) {
         $sleep++ if $sleep < 60;
       } elsif ($key eq '-' || $key eq '_') {
         $sleep-- if $sleep > 1;
+      } elsif ($key eq '/' || $key eq 's' || $key eq 'S') {
+        interactive_search(\@instances);
+      } elsif ($key eq 'd' || $key eq 'D') {
+        interactive_dump(\@instances);
       } elsif ($key eq 'h' || $key eq 'H' || $key eq '?') {
         show_interactive_help();
       }
@@ -652,6 +685,8 @@ sub show_help {
     --sort <key>               Sort instances by metric (descending)
                                Keys: usage, hit, conn, time, items,
                                      evict, gets, sets, read, write
+    --get <key>                Look up a key and display its value
+    --dump                     List all cached keys (then exit)
     --oneoff                   Run once without screen clearing
 
   INTERACTIVE KEYS (during monitoring):
@@ -661,6 +696,8 @@ sub show_help {
     g       Toggle get/set commands display
     l       Toggle lifetime stats
     +/-     Increase/decrease refresh interval
+    / or s  Search: look up a key by name
+    d       Dump: list all cached keys
     h, ?    Show interactive help
 
   EXAMPLES:
@@ -668,7 +705,9 @@ sub show_help {
     memcache-top --instances 10.0.0.1:11211,10.0.0.2:11211
     memcache-top --sleep 5 --commands --sort usage
     memcache-top --instances server1 --port 11211 --lifetime
-    memcache-top --oneoff --nocolor    (for scripting)
+    memcache-top --get session:abc123           (look up a key)
+    memcache-top --dump                         (list all keys)
+    memcache-top --oneoff --nocolor             (for scripting)
 
   THRESHOLDS:
     Values exceeding configured thresholds are highlighted in red.
@@ -697,6 +736,8 @@ sub show_interactive_help {
     l       Toggle lifetime stats mode
     +/=     Increase refresh interval by 1 second
     -/_     Decrease refresh interval by 1 second (min: 1s)
+    / or s  Search for a key by name and show its value
+    d       Dump/list all cached keys
     h/?     Show this help screen
 
   Column descriptions:
@@ -718,6 +759,196 @@ sub show_interactive_help {
 IHELP
   # Wait for any keypress
   my $dummy = timed_read_key(30);
+}
+
+################################################################################
+# cache_get
+# Connects to memcached instances and retrieves a key's value.
+#
+sub cache_get {
+  my ($instances_ref, $key) = @_;
+
+  foreach my $instance (@$instances_ref) {
+    my @split = split(/:/, $instance);
+    unless ($split[1]) {
+      $instance = $instance . ":" . $default_port;
+    }
+
+    my $sock = IO::Socket::INET->new(
+      PeerAddr => $instance,
+      Timeout  => $connect_timeout,
+    );
+    unless (defined $sock) {
+      print "[$instance] Connection failed\n";
+      next;
+    }
+    $sock->autoflush(1);
+
+    print $sock "get $key\r\n";
+
+    my $found = 0;
+    my $value = '';
+    my ($flags, $bytes_len) = (0, 0);
+
+    while (defined(my $line = <$sock>)) {
+      chomp $line;
+      $line =~ s/\r$//;
+
+      if ($line =~ /^VALUE\s+\S+\s+(\d+)\s+(\d+)/) {
+        $flags = $1;
+        $bytes_len = $2;
+        $found = 1;
+        next;
+      }
+      last if $line eq 'END';
+
+      if ($found) {
+        $value .= $line;
+      }
+    }
+
+    close $sock;
+
+    if ($found) {
+      print "\n";
+      print "  Instance:  $instance\n";
+      print "  Key:       $key\n";
+      print "  Flags:     $flags\n";
+      print "  Size:      $bytes_len bytes\n";
+      print "  Value:     $value\n";
+      print "\n";
+    } else {
+      print "[$instance] Key '$key' not found\n";
+    }
+  }
+}
+
+################################################################################
+# cache_dump_keys
+# Lists keys from memcached instances using 'stats items' + 'stats cachedump'.
+#
+sub cache_dump_keys {
+  my ($instances_ref) = @_;
+
+  foreach my $instance (@$instances_ref) {
+    my @split = split(/:/, $instance);
+    unless ($split[1]) {
+      $instance = $instance . ":" . $default_port;
+    }
+
+    my $sock = IO::Socket::INET->new(
+      PeerAddr => $instance,
+      Timeout  => $connect_timeout,
+    );
+    unless (defined $sock) {
+      print "[$instance] Connection failed\n";
+      next;
+    }
+    $sock->autoflush(1);
+
+    # First get slab IDs via 'stats items'
+    print $sock "stats items\r\n";
+    my %slabs;
+    while (defined(my $line = <$sock>)) {
+      chomp $line;
+      $line =~ s/\r$//;
+      last if $line eq 'END';
+      if ($line =~ /^STAT items:(\d+):number\s+(\d+)/) {
+        $slabs{$1} = $2;
+      }
+    }
+
+    if (!%slabs) {
+      print "[$instance] No items found (cache is empty)\n";
+      close $sock;
+      next;
+    }
+
+    print "\n  Instance: $instance\n";
+    print sprintf("  %-40s  %10s  %s\n", "KEY", "SIZE", "EXPIRY");
+    print "  " . ("-" x 70) . "\n";
+
+    my $total_keys = 0;
+
+    foreach my $slab_id (sort { $a <=> $b } keys %slabs) {
+      my $limit = $slabs{$slab_id};
+      $limit = 200 if $limit > 200;  # cap to avoid flooding
+
+      # Reconnect for each slab dump (some versions need this)
+      my $dsock = IO::Socket::INET->new(
+        PeerAddr => $instance,
+        Timeout  => $connect_timeout,
+      );
+      next unless defined $dsock;
+      $dsock->autoflush(1);
+
+      print $dsock "stats cachedump $slab_id $limit\r\n";
+
+      while (defined(my $line = <$dsock>)) {
+        chomp $line;
+        $line =~ s/\r$//;
+        last if $line eq 'END';
+        # Format: ITEM <key> [<size> b; <expiry> s]
+        if ($line =~ /^ITEM\s+(\S+)\s+\[(\d+)\s+b;\s+(\d+)\s+s\]/) {
+          my ($k, $sz, $exp) = ($1, $2, $3);
+          my $exp_str = $exp == 0 ? "never" : scalar(localtime($exp));
+          print sprintf("  %-40s  %8s B  %s\n", substr($k, 0, 40), $sz, $exp_str);
+          $total_keys++;
+        }
+      }
+
+      close $dsock;
+    }
+
+    print "  " . ("-" x 70) . "\n";
+    print "  Total: $total_keys keys listed\n\n";
+
+    close $sock;
+  }
+}
+
+################################################################################
+# interactive_search
+# Prompts user for a key name and looks it up in memcached.
+#
+sub interactive_search {
+  my ($instances_ref) = @_;
+
+  # Restore terminal for line input
+  system("stty icanon echo 2>/dev/null");
+
+  print "\033[2J\033[H";  # Clear screen
+  print "\n  Search cache by key name\n";
+  print "  " . ("-" x 40) . "\n";
+  print "  Enter key (or empty to cancel): ";
+
+  my $key = <STDIN>;
+  chomp $key if defined $key;
+
+  if (!defined $key || $key eq '') {
+    return;
+  }
+
+  cache_get($instances_ref, $key);
+
+  print "  Press any key to return to monitoring...";
+  my $dummy = timed_read_key(30);
+}
+
+################################################################################
+# interactive_dump
+# Shows all cached keys in an interactive overlay.
+#
+sub interactive_dump {
+  my ($instances_ref) = @_;
+
+  print "\033[2J\033[H";  # Clear screen
+  print "\n  Listing cached keys...\n\n";
+
+  cache_dump_keys($instances_ref);
+
+  print "  Press any key to return to monitoring...";
+  my $dummy = timed_read_key(60);
 }
 
 ################################################################################

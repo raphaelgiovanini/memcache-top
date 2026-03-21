@@ -66,6 +66,8 @@ Option                          Description
 ``--commands / --nocommands``   Show get/set commands (default: off)
 ``--cumulative``                Show cumulative stats since start
 ``--sort <key>``                Sort instances by metric (descending)
+``--get <key>``                 Look up a key and display its value
+``--dump``                      List all cached keys (then exit)
 ``--oneoff``                    Run once, no screen clearing (for scripts)
 ==============================  ================================================
 
@@ -86,6 +88,8 @@ Key    Action
 ``l``  Toggle lifetime stats mode
 ``+``  Increase refresh interval (+1 second)
 ``-``  Decrease refresh interval (-1 second)
+``/``  Search: look up a cache key by name
+``d``  Dump: list all cached keys
 ``h``  Show interactive help screen
 =====  =========================================
 
@@ -102,6 +106,12 @@ Examples
 
    # Fast refresh with all columns
    ./memcache-top --sleep 1 --commands --bytes
+
+   # Look up a specific key
+   ./memcache-top --get session:user123
+
+   # List all cached keys
+   ./memcache-top --dump
 
    # Lifetime stats, no color (for logging)
    ./memcache-top --lifetime --nocolor --oneoff >> stats.log
