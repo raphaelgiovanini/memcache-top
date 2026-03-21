@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'memcache-top'
+    static_configs:
+      - targets: ['memcache-exporter:9150']
+    metrics_path: /metrics

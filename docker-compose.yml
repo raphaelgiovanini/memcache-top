@@ -1,9 +1,13 @@
 services:
+
+  # ── Memcached instance ──────────────────────────────────────────────
   memcached:
     image: memcached:latest
     ports:
       - "11211:11211"
+    command: ["-m", "64"]
 
+  # ── Terminal monitor (interactive) ──────────────────────────────────
   memcache-top:
     build: .
     depends_on:
@@ -11,4 +15,40 @@ services:
     command: ["--instances", "memcached:11211", "--sleep", "3", "--color"]
     tty: true
     stdin_open: true
-    network_mode: host
+    profiles:
+      - monitor
+
+  # ── Prometheus exporter ─────────────────────────────────────────────
+  memcache-exporter:
+    build: .
+    depends_on:
+      - memcached
+    command: ["--instances", "memcached:11211", "--prometheus", "9150"]
+    ports:
+      - "9150:9150"
+
+  # ── Prometheus ──────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    depends_on:
+      - memcache-exporter
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  # ── Grafana ─────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./grafana/dashboard-provider.yml:/etc/grafana/provisioning/dashboards/dashboard-provider.yml:ro
+      - ./grafana/dashboard.json:/var/lib/grafana/dashboards/memcached.json:ro
+    ports:
+      - "3000:3000"

@@ -16,9 +16,9 @@ use Time::HiRes 'time';
 my (@default_instances, @instances, $remote, $sleep, %threshold, %laststats,
     $usecolor, @keys, $default_port, $version, @out, $lifetime, $bytes,
     $commands, $cumulative, $oneoff, $sort_by, $help, $connect_timeout,
-    $get_key, $dump_keys);
+    $get_key, $dump_keys, $prometheus_port, $json_mode);
 
-$version = "1.1";
+$version = "2.0";
 
 ################################################################################
 # CONFIGURATION
@@ -72,6 +72,12 @@ $get_key = '';
 # Dump all keys
 $dump_keys = 0;
 
+# Prometheus exporter port (0 = disabled)
+$prometheus_port = 0;
+
+# JSON output mode
+$json_mode = 0;
+
 # List of servers/ ports to query.
 @default_instances = (
   '127.0.0.1:11211',
@@ -120,6 +126,8 @@ if (@ARGV) {
       'timeout=i'   => \$connect_timeout,
       'get=s'       => \$get_key,
       'dump'        => \$dump_keys,
+      'prometheus=i' => \$prometheus_port,
+      'json'        => \$json_mode,
       'help|h'      => \$help,
     );
     if ($help) {
@@ -166,6 +174,18 @@ if ( $get_key ) {
 if ( $dump_keys ) {
   cache_dump_keys(\@instances);
   exit 0;
+}
+
+# Handle --prometheus (exporter) mode
+if ( $prometheus_port ) {
+  run_prometheus_exporter($prometheus_port, \@instances);
+  exit 0;  # never reached
+}
+
+# Handle --json mode
+if ( $json_mode ) {
+  $oneoff = 1;
+  $usecolor = 0;
 }
 
 # Setup non-blocking keyboard input for interactive mode
@@ -388,7 +408,7 @@ while ($i) {
       push @row_out, format_stat($outstats{bytes_written}, $threshold{bytes_written}, 1, 0, '', '%.0f');
     }
 
-    push @instance_rows, { text => join('', @row_out), stats => {%outstats} };
+    push @instance_rows, { text => join('', @row_out), stats => {%outstats}, instance => $instance };
 
     foreach my $key (@keys) {
       $tot{$key} = $tot{$key} + $outstats{$key};
@@ -514,6 +534,12 @@ while ($i) {
     push @out, "h";
     push @out, color 'reset' if $usecolor;
     push @out, "=help\n";
+  }
+
+  # JSON output mode
+  if ($json_mode) {
+    print_json(\@instance_rows, \%tot, $count);
+    exit 0;
   }
 
   print @out;
@@ -687,6 +713,8 @@ sub show_help {
                                      evict, gets, sets, read, write
     --get <key>                Look up a key and display its value
     --dump                     List all cached keys (then exit)
+    --prometheus <port>        Start Prometheus exporter on given port
+    --json                     Output stats as JSON (single run)
     --oneoff                   Run once without screen clearing
 
   INTERACTIVE KEYS (during monitoring):
@@ -700,13 +728,19 @@ sub show_help {
     d       Dump: list all cached keys
     h, ?    Show interactive help
 
+  GRAFANA INTEGRATION:
+    memcache-top --prometheus 9150
+    Then configure Prometheus to scrape http://host:9150/metrics
+    Import the included grafana/dashboard.json into Grafana.
+
   EXAMPLES:
     memcache-top
     memcache-top --instances 10.0.0.1:11211,10.0.0.2:11211
     memcache-top --sleep 5 --commands --sort usage
-    memcache-top --instances server1 --port 11211 --lifetime
     memcache-top --get session:abc123           (look up a key)
     memcache-top --dump                         (list all keys)
+    memcache-top --json                         (JSON output)
+    memcache-top --prometheus 9150              (Grafana exporter)
     memcache-top --oneoff --nocolor             (for scripting)
 
   THRESHOLDS:
@@ -905,6 +939,220 @@ sub cache_dump_keys {
 
     close $sock;
   }
+}
+
+################################################################################
+# print_json
+# Outputs all stats as JSON for pipeline/integration use.
+#
+sub print_json {
+  my ($rows_ref, $tot_ref, $count) = @_;
+
+  print "{\n";
+  print "  \"timestamp\": " . int(time()) . ",\n";
+  print "  \"instances\": [\n";
+
+  my @json_instances;
+  foreach my $row (@$rows_ref) {
+    my $s = $row->{stats};
+    my $inst = $row->{instance};
+    push @json_instances, sprintf(
+      '    {"instance":"%s","usage":%.2f,"cache_hit":%.2f,"curr_connections":%d,' .
+      '"time_ms":%.2f,"curr_items":%d,"evictions":%.1f,' .
+      '"cmd_get":%.1f,"cmd_set":%.1f,"bytes_read":%.1f,"bytes_written":%.1f,' .
+      '"bytes":%d,"limit_maxbytes":%d}',
+      $inst, $s->{usage}, $s->{cache_hit}, $s->{curr_connections},
+      $s->{time}, $s->{curr_items}, $s->{evictions},
+      $s->{cmd_get}, $s->{cmd_set}, $s->{bytes_read}, $s->{bytes_written},
+      $s->{bytes}, $s->{limit_maxbytes}
+    );
+  }
+  print join(",\n", @json_instances) . "\n";
+  print "  ],\n";
+
+  if ($count > 0) {
+    printf "  \"average\": {\"usage\":%.2f,\"cache_hit\":%.2f,\"curr_connections\":%d,\"time_ms\":%.2f,\"curr_items\":%d,\"evictions\":%.1f},\n",
+      $tot_ref->{usage}/$count, $tot_ref->{cache_hit}/$count,
+      $tot_ref->{curr_connections}/$count, $tot_ref->{time}/$count,
+      $tot_ref->{curr_items}/$count, $tot_ref->{evictions}/$count;
+    printf "  \"total\": {\"bytes\":%d,\"limit_maxbytes\":%d,\"curr_connections\":%d,\"curr_items\":%d,\"evictions\":%.1f}\n",
+      $tot_ref->{bytes}, $tot_ref->{limit_maxbytes},
+      $tot_ref->{curr_connections}, $tot_ref->{curr_items}, $tot_ref->{evictions};
+  }
+  print "}\n";
+}
+
+################################################################################
+# collect_stats_for_instance
+# Collects raw stats from a single memcached instance. Returns hashref or undef.
+#
+sub collect_stats_for_instance {
+  my ($instance) = @_;
+
+  my @split = split(/:/, $instance);
+  unless ($split[1]) {
+    $instance = $instance . ":" . $default_port;
+  }
+
+  my $t0 = time();
+  my $sock = IO::Socket::INET->new(
+    PeerAddr => $instance,
+    Timeout  => $connect_timeout,
+  );
+  return undef unless defined $sock;
+  $sock->autoflush(1);
+
+  print $sock "stats\n";
+
+  my %stats;
+  while (defined(my $line = <$sock>)) {
+    last if $line =~ /END/;
+    chomp $line;
+    my @bits = split(' ', $line);
+    next unless defined $bits[1] && defined $bits[2];
+    $stats{$bits[1]} = $bits[2];
+  }
+  close $sock;
+
+  my $t1 = time();
+  $stats{_time_ms} = ($t1 - $t0) * 1000;
+  $stats{_instance} = $instance;
+
+  return \%stats;
+}
+
+################################################################################
+# run_prometheus_exporter
+# Starts an HTTP server that exposes memcached metrics in Prometheus format.
+#
+sub run_prometheus_exporter {
+  my ($port, $instances_ref) = @_;
+
+  my $server = IO::Socket::INET->new(
+    LocalPort => $port,
+    Type      => IO::Socket::SOCK_STREAM,
+    Reuse     => 1,
+    Listen    => 5,
+  ) or die "Cannot start Prometheus exporter on port $port: $!\n";
+
+  print "memcache-top Prometheus exporter running on http://0.0.0.0:$port/metrics\n";
+  print "Monitoring instances: " . join(', ', @$instances_ref) . "\n";
+
+  while (my $client = $server->accept()) {
+    # Read the HTTP request (we only care about GET /metrics)
+    my $request = '';
+    while (defined(my $line = <$client>)) {
+      $request .= $line;
+      last if $line =~ /^\r?\n$/;
+    }
+
+    my $body;
+    if ($request =~ /^GET\s+\/metrics/) {
+      $body = generate_prometheus_metrics($instances_ref);
+      print $client "HTTP/1.1 200 OK\r\n";
+      print $client "Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n";
+    } elsif ($request =~ /^GET\s+\/health/) {
+      $body = "OK\n";
+      print $client "HTTP/1.1 200 OK\r\n";
+      print $client "Content-Type: text/plain\r\n";
+    } elsif ($request =~ /^GET\s+\//) {
+      $body = "<html><body><h1>memcache-top exporter</h1><p><a href=\"/metrics\">/metrics</a></p></body></html>\n";
+      print $client "HTTP/1.1 200 OK\r\n";
+      print $client "Content-Type: text/html\r\n";
+    } else {
+      $body = "Not Found\n";
+      print $client "HTTP/1.1 404 Not Found\r\n";
+      print $client "Content-Type: text/plain\r\n";
+    }
+
+    print $client "Content-Length: " . length($body) . "\r\n";
+    print $client "Connection: close\r\n";
+    print $client "\r\n";
+    print $client $body;
+    close $client;
+  }
+}
+
+################################################################################
+# generate_prometheus_metrics
+# Collects stats from all instances and formats as Prometheus exposition text.
+#
+sub generate_prometheus_metrics {
+  my ($instances_ref) = @_;
+
+  my $out = '';
+
+  # Help text
+  $out .= "# HELP memcached_up Whether the memcached instance is up.\n";
+  $out .= "# TYPE memcached_up gauge\n";
+  $out .= "# HELP memcached_usage_percent Memory usage percentage.\n";
+  $out .= "# TYPE memcached_usage_percent gauge\n";
+  $out .= "# HELP memcached_cache_hit_percent Cache hit ratio.\n";
+  $out .= "# TYPE memcached_cache_hit_percent gauge\n";
+  $out .= "# HELP memcached_current_connections Current number of connections.\n";
+  $out .= "# TYPE memcached_current_connections gauge\n";
+  $out .= "# HELP memcached_query_time_seconds Time to query stats.\n";
+  $out .= "# TYPE memcached_query_time_seconds gauge\n";
+  $out .= "# HELP memcached_current_items Current number of items stored.\n";
+  $out .= "# TYPE memcached_current_items gauge\n";
+  $out .= "# HELP memcached_evictions_total Total number of evictions.\n";
+  $out .= "# TYPE memcached_evictions_total counter\n";
+  $out .= "# HELP memcached_cmd_get_total Total GET commands.\n";
+  $out .= "# TYPE memcached_cmd_get_total counter\n";
+  $out .= "# HELP memcached_cmd_set_total Total SET commands.\n";
+  $out .= "# TYPE memcached_cmd_set_total counter\n";
+  $out .= "# HELP memcached_get_hits_total Total GET hits.\n";
+  $out .= "# TYPE memcached_get_hits_total counter\n";
+  $out .= "# HELP memcached_get_misses_total Total GET misses.\n";
+  $out .= "# TYPE memcached_get_misses_total counter\n";
+  $out .= "# HELP memcached_bytes_read_total Total bytes read.\n";
+  $out .= "# TYPE memcached_bytes_read_total counter\n";
+  $out .= "# HELP memcached_bytes_written_total Total bytes written.\n";
+  $out .= "# TYPE memcached_bytes_written_total counter\n";
+  $out .= "# HELP memcached_bytes Current bytes used for storage.\n";
+  $out .= "# TYPE memcached_bytes gauge\n";
+  $out .= "# HELP memcached_limit_maxbytes Maximum bytes allowed.\n";
+  $out .= "# TYPE memcached_limit_maxbytes gauge\n";
+  $out .= "# HELP memcached_uptime_seconds Uptime of the memcached instance.\n";
+  $out .= "# TYPE memcached_uptime_seconds gauge\n";
+
+  foreach my $instance (@$instances_ref) {
+    my $stats = collect_stats_for_instance($instance);
+    my $inst = $instance;
+    my @s = split(/:/, $inst);
+    $inst = $s[0] . ":" . ($s[1] || $default_port);
+    my $label = "instance=\"$inst\"";
+
+    unless ($stats) {
+      $out .= "memcached_up{$label} 0\n";
+      next;
+    }
+
+    $out .= "memcached_up{$label} 1\n";
+
+    my $max = $stats->{limit_maxbytes} || 1;
+    my $usage = ($stats->{bytes} || 0) / $max * 100;
+    my $cmd_get = $stats->{cmd_get} || 0;
+    my $hit_pct = $cmd_get > 0 ? ($stats->{get_hits} || 0) / $cmd_get * 100 : 0;
+
+    $out .= sprintf("memcached_usage_percent{$label} %.2f\n", $usage);
+    $out .= sprintf("memcached_cache_hit_percent{$label} %.2f\n", $hit_pct);
+    $out .= sprintf("memcached_current_connections{$label} %d\n", $stats->{curr_connections} || 0);
+    $out .= sprintf("memcached_query_time_seconds{$label} %.6f\n", ($stats->{_time_ms} || 0) / 1000);
+    $out .= sprintf("memcached_current_items{$label} %d\n", $stats->{curr_items} || 0);
+    $out .= sprintf("memcached_evictions_total{$label} %d\n", $stats->{evictions} || 0);
+    $out .= sprintf("memcached_cmd_get_total{$label} %d\n", $stats->{cmd_get} || 0);
+    $out .= sprintf("memcached_cmd_set_total{$label} %d\n", $stats->{cmd_set} || 0);
+    $out .= sprintf("memcached_get_hits_total{$label} %d\n", $stats->{get_hits} || 0);
+    $out .= sprintf("memcached_get_misses_total{$label} %d\n", $stats->{get_misses} || 0);
+    $out .= sprintf("memcached_bytes_read_total{$label} %d\n", $stats->{bytes_read} || 0);
+    $out .= sprintf("memcached_bytes_written_total{$label} %d\n", $stats->{bytes_written} || 0);
+    $out .= sprintf("memcached_bytes{$label} %d\n", $stats->{bytes} || 0);
+    $out .= sprintf("memcached_limit_maxbytes{$label} %d\n", $stats->{limit_maxbytes} || 0);
+    $out .= sprintf("memcached_uptime_seconds{$label} %d\n", $stats->{uptime} || 0);
+  }
+
+  return $out;
 }
 
 ################################################################################
