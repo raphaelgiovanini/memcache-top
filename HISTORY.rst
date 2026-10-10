@@ -26,3 +26,11 @@ v0.6 - 2009-04-28 - ntang
   get/set commands, or both.  Bear in mind if you specify both you will
   exceed the width of a standard terminal!  You've been warned.  :P
   Also, some minor display changes, etc. etc.
+v0.8 - 2026-10-10
+  htop/glances-style redesign: cluster meters, OK/WARNING/CRITICAL status,
+  yellow/red levels and an ALERTS panel that says what is wrong.
+  New checks: restarts, max_connections, rejected connections.
+  Fixed: hit ratio now per interval, rates use real elapsed time, ITEMS no
+  longer always red, latency measured on a persistent connection, --oneoff
+  takes two samples and returns a Nagios-style exit code, --cumulative no
+  longer inflates thresholds every refresh.
