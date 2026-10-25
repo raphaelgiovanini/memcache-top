@@ -1,37 +1,50 @@
 memcache-top
 ============
 
-"top" for memcache - watch the traffic and other stats in real-time, and see
-at a glance when an instance is actually in trouble.  In the style of htop
-and glances.
+"top" for memcached - watch traffic and stats in real time, and see at a
+glance when an instance is actually in trouble.  In the style of htop and
+btop: quiet when everything is fine, yellow or red only when it is not.
 
 Single Perl script, core modules only.  Speaks the memcached ``stats``
-command on port 11211.  Written against memcached v 1.2.3, but works fine
-w/ later versions.
+command over TCP.  Works with memcached 1.2.3 and later.
+
+Interface in English, Portuguese and Spanish.
 
 .. image:: docs/screenshot.png
    :alt: memcache-top showing an instance that is evicting, near max_connections and recently restarted
+
+INSTALL
+-------
+
+::
+
+   curl -O https://raw.githubusercontent.com/raphaelgiovanini/memcache-top/master/memcache-top
+   chmod +x memcache-top
+
+Needs only Perl 5.10+ (present on almost every Linux and macOS box).
 
 USAGE
 -----
 
 ::
 
-   ./memcache-top                                 # 127.0.0.1:11211, refresh 3s
+   ./memcache-top --instances 127.0.0.1           # --instances is required
    ./memcache-top --instances mc1,mc2:11212 --sleep 5
-   ./memcache-top --bytes                         # add RX/s and TX/s columns
-   ./memcache-top --oneoff                        # exit 0 OK, 1 WARNING, 2 CRITICAL
+   ./memcache-top --instances mc1 --bytes         # add RX/s and TX/s columns
+   ./memcache-top --instances mc1 --lang pt       # Portuguese interface
+   ./memcache-top --instances mc1 --oneoff        # exit 0 OK, 1 WARN, 2 CRIT, 3 bad usage
 
-   - Specify instances w/ --instances (multiple times or comma separated)
-   - Specify default port w/ --port (defaults to 11211)
-   - Specify sleep time w/ --sleep (default 3), or as a bare number
-   - Specify color output w/ --color (default) or --nocolor
-   - Specify lifetime stats (averaged over server uptime) w/ --lifetime
-   - Specify read and write bytes columns w/ --bytes or --nobytes (default)
-   - Specify get and set columns w/ --commands (default) or --nocommands
-   - Specify cumulative numbers (since start of run) w/ --cumulative
-   - Run a single time without clearing the screen, good for scripts and
-     monitoring checks (cron, Nagios, Zabbix): --oneoff
+   - ``--instances h:p,...``  instances to watch (required; repeat or comma separate)
+   - ``--port N``             default port when an instance has none (11211)
+   - ``--sleep N``            refresh interval in seconds (3), or as a bare number
+   - ``--lang en|pt|es``      interface language (default: from LANG, else en)
+   - ``--color / --nocolor``  colored output (on)
+   - ``--lifetime``           stats averaged over server uptime
+   - ``--bytes / --nobytes``  read and write bytes columns (off)
+   - ``--commands / --nocommands``  get and set columns (on)
+   - ``--cumulative``         totals since memcache-top started
+   - ``--oneoff``             print once and exit, for scripts and monitoring
+     checks (cron, Nagios, Zabbix)
 
 WHAT IT FLAGS
 -------------
@@ -47,6 +60,9 @@ WHAT IT FLAGS
 
    A full cache alone is not flagged: memcached is meant to fill up and
    evict by LRU.  Evictions are what tell you it is too small.
+
+   The Mem and Con bars take the color of the worst instance, so one
+   overloaded node is not hidden by a healthy cluster average.
 
    Hit ratio and rates are per refresh interval, measured on a persistent
    connection.  The first screen shows ``-`` until there are two samples.
@@ -65,3 +81,17 @@ THRESHOLDS
 
    Watching an instance over a WAN?  Raise ``latency`` above your network
    round-trip, or it will always show yellow or red.
+
+TRANSLATIONS
+------------
+
+   All messages live in ``%msg`` near the top of the script.  To add a
+   language, copy the ``en`` block, translate it and send a pull request.
+   Missing keys fall back to English.
+
+AUTHORS
+-------
+
+   - Raphael Giovanini - maintainer; v0.8+ redesign, alerts, translations
+   - Nicholas Tang - original author (2009)
+   - Contributors: Evan Culver, richlv and others, see the git history
